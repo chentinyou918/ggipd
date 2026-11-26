@@ -242,28 +242,102 @@ $('#gemini-key').addEventListener('change',()=>{
   const key=$('#gemini-key').value.trim();
   if(key)localStorage.setItem(GEMINI_KEY_STORAGE,key);else localStorage.removeItem(GEMINI_KEY_STORAGE);
 });
-$('#ai-form').addEventListener('submit',async event=>{
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.8-flash-lite'];
+const BUSY_RETRY_DELAY_MS = 2000;
+const BUSY_FINAL_MESSAGE = '目前 Google AI 免費伺服器處於尖峰塞車時段，系統已自動重試但仍無回應，請稍後再試。';
+const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+function isBusyGeminiError(status, message) {
+  return status === 503 || status === 429 || /high demand|overloaded/i.test(message || '');
+}
+async function callGeminiModel(model, apiKey, requestBody) {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    body: JSON.stringify(requestBody)
+  });
+  let payload;
+  try { payload = await response.json(); }
+  catch { payload = {}; }
+  if (!response.ok) {
+    const message = payload.error?.message || `Gemini HTTP ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.busy = isBusyGeminiError(response.status, message);
+    throw error;
+  }
+  return payload;
+}
+async function generateWithFallback(apiKey, requestBody) {
+  let lastError = null;
+  let sawBusyError = false;
+  for (let modelIndex = 0; modelIndex < GEMINI_MODELS.length; modelIndex += 1) {
+    const model = GEMINI_MODELS[modelIndex];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await callGeminiModel(model, apiKey, requestBody);
+      } catch (error) {
+        lastError = error;
+        if (error.busy) {
+          sawBusyError = true;
+          if (attempt === 0) {
+            $('#ai-status').textContent = '伺服器忙碌中，正在自動重試...';
+            await sleep(BUSY_RETRY_DELAY_MS);
+            continue;
+          }
+          break;
+        }
+        // The fallback model may not be enabled/available for this API key; skip it without retry.
+        if (modelIndex > 0 && error.status === 404) break;
+        // A first-model 404 also means this key cannot use the model; move on to the fallback.
+        if (error.status === 404) break;
+        throw error;
+      }
+    }
+  }
+  if (sawBusyError) {
+    const error = new Error(BUSY_FINAL_MESSAGE);
+    error.busyExhausted = true;
+    throw error;
+  }
+  throw lastError || new Error('目前沒有可用的 Gemini 模型。');
+}
+$('#ai-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const apiKey=$('#gemini-key').value.trim(), prompt=$('#ai-prompt').value.trim();
-  if(!apiKey)return toast('請先貼上自己的 Gemini API Key。');
-  if(!prompt)return toast('請輸入想安排的事項。');
-  localStorage.setItem(GEMINI_KEY_STORAGE,apiKey);
-  const button=$('#ai-submit');button.disabled=true;$('#ai-status').textContent='AI 正在整理你的安排…';$('#ai-output').hidden=true;$('#ai-add-draft').hidden=true;
+  const apiKey = $('#gemini-key').value.trim();
+  const prompt = $('#ai-prompt').value.trim();
+  if (!apiKey) return toast('請先貼上自己的 Gemini API Key。');
+  if (!prompt) return toast('請輸入想安排的事項。');
+  localStorage.setItem(GEMINI_KEY_STORAGE, apiKey);
+  const button = $('#ai-submit');
+  button.disabled = true;
+  $('#ai-status').textContent = 'AI 正在整理你的安排…';
+  $('#ai-output').hidden = true;
+  $('#ai-add-draft').hidden = true;
+  aiDraft = null;
   try {
-    const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',{
-      method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':apiKey},
-      body:JSON.stringify({contents:[{role:'user',parts:[{text:`你是行程整理助理。使用者輸入：${prompt}\n\n請用繁體中文回覆清楚、可執行的安排建議。若資訊不足，請標示需確認的時間，不要自行聲稱已建立行程。最後另附一個 JSON 物件，格式為 {"title":"簡短名稱","type":"task 或 event","startAt":"YYYY-MM-DDTHH:mm 或空字串","endAt":"YYYY-MM-DDTHH:mm 或空字串","dueAt":"YYYY-MM-DDTHH:mm 或空字串","category":"個人","reminderMinutes":10,"note":"備註"}。相對日期以今日 ${new Date().toLocaleDateString('sv-SE')} 為準，時間採 24 小時。`}] }],generationConfig:{temperature:0.3}})
-    });
-    const payload=await response.json();
-    if(!response.ok)throw new Error(payload.error?.message||`Gemini HTTP ${response.status}`);
-    const text=payload.candidates?.[0]?.content?.parts?.map(part=>part.text||'').join('\n')||'未取得 AI 回覆。';
-    $('#ai-output').textContent=text;$('#ai-output').hidden=false;$('#ai-status').textContent='建議草案已產生。請確認內容後再手動新增。';
-    const match=text.match(/\{[\s\S]*\}/);
-    if(match){try{aiDraft=JSON.parse(match[0]);$('#ai-add-draft').hidden=!aiDraft.title||!currentUser;}catch{aiDraft=null}}
-  } catch(error) { console.error(error);$('#ai-status').textContent=`AI 呼叫失敗：${error.message}`; }
-  finally {button.disabled=false;}
-});
-$('#ai-add-draft').addEventListener('click',async()=>{
+    const requestBody = {
+      contents: [{ role: 'user', parts: [{ text: `你是行程整理助理。使用者輸入：${prompt}\n\n請用繁體中文回覆清楚、可執行的安排建議。若資訊不足，請標示需確認的時間，不要自行聲稱已建立行程。最後另附一個 JSON 物件，格式為 {"title":"簡短名稱","type":"task 或 event","startAt":"YYYY-MM-DDTHH:mm 或空字串","endAt":"YYYY-MM-DDTHH:mm 或空字串","dueAt":"YYYY-MM-DDTHH:mm 或空字串","category":"個人","reminderMinutes":10,"note":"備註"}。相對日期以今日 ${new Date().toLocaleDateString('sv-SE')} 為準，時間採 24 小時。` }] }],
+      generationConfig: { temperature: 0.3 }
+    };
+    const payload = await generateWithFallback(apiKey, requestBody);
+    const text = payload.candidates?.[0]?.content?.parts?.map(part => part.text || '').join('\n') || '未取得 AI 回覆。';
+    $('#ai-output').textContent = text;
+    $('#ai-output').hidden = false;
+    $('#ai-status').textContent = '建議草案已產生。請確認內容後再手動新增。';
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        aiDraft = JSON.parse(match[0]);
+        $('#ai-add-draft').hidden = !aiDraft.title || !currentUser;
+      } catch { aiDraft = null; }
+    }
+  } catch (error) {
+    console.error('Gemini request failed:', error);
+    $('#ai-status').textContent = error.busyExhausted ? BUSY_FINAL_MESSAGE : `AI 呼叫失敗：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});$('#ai-add-draft').addEventListener('click',async()=>{
   if(!aiDraft||!currentUser)return toast('請先登入，並確認 AI 草案內容。');
   try {
     const isEvent=aiDraft.type==='event';
