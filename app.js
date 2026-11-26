@@ -250,7 +250,7 @@ $('#ai-form').addEventListener('submit',async event=>{
   localStorage.setItem(GEMINI_KEY_STORAGE,apiKey);
   const button=$('#ai-submit');button.disabled=true;$('#ai-status').textContent='AI 正在整理你的安排…';$('#ai-output').hidden=true;$('#ai-add-draft').hidden=true;
   try {
-    const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{
+    const response=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent',{
       method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':apiKey},
       body:JSON.stringify({contents:[{role:'user',parts:[{text:`你是行程整理助理。使用者輸入：${prompt}\n\n請用繁體中文回覆清楚、可執行的安排建議。若資訊不足，請標示需確認的時間，不要自行聲稱已建立行程。最後另附一個 JSON 物件，格式為 {"title":"簡短名稱","type":"task 或 event","startAt":"YYYY-MM-DDTHH:mm 或空字串","endAt":"YYYY-MM-DDTHH:mm 或空字串","dueAt":"YYYY-MM-DDTHH:mm 或空字串","category":"個人","reminderMinutes":10,"note":"備註"}。相對日期以今日 ${new Date().toLocaleDateString('sv-SE')} 為準，時間採 24 小時。`}] }],generationConfig:{temperature:0.3}})
     });
