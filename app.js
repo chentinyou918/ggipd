@@ -91,7 +91,7 @@ function updateIdentity(user) {
 }
 function render() {
   renderHeader();
-  $('[data-nav]').forEach(button=>button.classList.toggle('active',button.dataset.nav===view));
+  $$('[data-nav]').forEach(button=>button.classList.toggle('active',button.dataset.nav===view));
   $('#tasks-title').textContent=view==='tasks'?'我的待辦':'待辦任務';
   const dayTasks = tasks.filter(task => {
     const value = task.type === 'event' ? task.startAt : task.dueAt;
